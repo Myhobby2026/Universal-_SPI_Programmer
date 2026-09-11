@@ -1,0 +1,946 @@
+# UNIVERSAL MCU / MEMORY PROGRAMMER
+
+## Professional Tkinter GUI + Arduino Firmware ESP32 Board
+
+Build a professional Windows-based Universal Programmer consisting of:
+
+1. A modern Python Tkinter GUI application.
+2. Arduino firmware that acts as the hardware programming interface.
+3. A modular protocol architecture so additional IC families can be added later without redesigning the entire application.
+
+The initial target platforms are:
+
+- AVR ISP with Support ATtiny85 also
+- SPI memory devices
+- I²C memory devices
+
+The architecture must be extensible for future protocols such as 1-Wire and other custom serial protocols.
+
+---
+
+## 1. IMPORTANT EXISTING FIRMWARE
+
+Use the supplied ArduinoISP sketch as the starting/reference firmware.
+
+Do not unnecessarily remove or break its existing AVR ISP functionality.
+
+The supplied firmware already implements concepts including:
+
+- Arduino-to-target SPI communication
+- Target RESET control
+- AVR programming mode
+- Device signature reading
+- Flash reading
+- EEPROM reading
+- Flash programming
+- EEPROM programming
+- STK500/AVRISP-style serial commands
+
+Preserve these capabilities while restructuring or extending the firmware where necessary.
+
+---
+
+# 2. SOFTWARE ARCHITECTURE
+
+Create the project using a clean modular architecture.
+
+Suggested structure:
+
+```
+UniversalProgrammer/
+│
+├── app.py
+├── requirements.txt
+├── README.md
+│
+├── gui/
+│   ├── main_window.py
+│   ├── hex_viewer.py
+│   ├── device_panel.py
+│   ├── progress_panel.py
+│   └── styles.py
+│
+├── protocols/
+│   ├── avr_isp.py
+│   ├── spi_memory.py
+│   ├── i2c_memory.py
+│   └── protocol_base.py
+│
+├── hardware/
+│   ├── serial_manager.py
+│   └── arduino_interface.py
+│
+├── memory/
+│   ├── dump_manager.py
+│   ├── bin_manager.py
+│   └── hex_parser.py
+│
+└── arduino/
+    └── universal_programmer.ino
+```
+
+Keep GUI, communication, protocol logic and file handling separated.
+
+---
+
+# 3. PROFESSIONAL GUI
+
+Create a modern professional desktop interface using Tkinter/ttk.
+
+The interface should look like a real hardware programmer application rather than a basic Python utility.
+
+Main layout:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ UNIVERSAL PROGRAMMER                                │
+│ AVR • SPI • I²C                                     │
+├─────────────────────────────────────────────────────┤
+│ CONNECTION                                          │
+│                                                     │
+│ Port: [ COM5 ▼ ]   Baud: [115200 ▼] [ CONNECT ]    │
+│ Status: ● Connected                                 │
+├─────────────────────────────────────────────────────┤
+│ DEVICE                                              │
+│                                                     │
+│ Protocol: [ AVR ISP ▼ ]                             │
+│ Device:   [ Auto Detect ]                           │
+│ Signature: 1E 95 0F                                 │
+│ Flash: 32 KB        EEPROM: 1 KB                    │
+├─────────────────────────────────────────────────────┤
+│ OPERATIONS                                          │
+│                                                     │
+│ [ READ ] [ WRITE ] [ VERIFY ] [ ERASE ]             │
+│                                                     │
+│ [ READ FLASH ] [ READ EEPROM ] [ READ ALL ]         │
+├─────────────────────────────────────────────────────┤
+│ HEX VIEW                                            │
+│                                                     │
+│ Address    00 01 02 03 04 05 06 07 08 ...          │
+│ 00000000   FF 3A 91 00 7E ...                      │
+│ 00000010   12 44 A8 9F ...                         │
+│                                                     │
+├─────────────────────────────────────────────────────┤
+│ PROGRESS                                            │
+│ ███████████████████░░░░ 78%                        │
+│ Reading Flash...                                    │
+├─────────────────────────────────────────────────────┤
+│ LOG                                                 │
+│ [10:22:01] Connected to Arduino                    │
+│ [10:22:02] Target detected                         │
+│ [10:22:03] Reading Flash                           │
+└─────────────────────────────────────────────────────┘
+```
+
+Use:
+
+- ttk widgets
+- frames
+- tabs where appropriate
+- professional spacing
+- readable typography
+- clear status indicators
+- keyboard shortcuts where useful
+- resizable window
+- responsive UI
+
+Do not freeze the GUI during Read/Write operations.
+
+Use worker threads or an appropriate asynchronous architecture for long operations.
+
+---
+
+# 4. CONNECTION MANAGEMENT
+
+The application must:
+
+- Detect available COM ports.
+- Refresh COM ports.
+- Connect/disconnect from Arduino.
+- Display connection status.
+- Handle Arduino disconnect/reconnect gracefully.
+- Detect communication timeout.
+- Detect invalid responses.
+- Show useful error messages.
+
+Do not crash if the Arduino is disconnected.
+
+---
+
+# 5. PROTOCOL SELECTION
+
+Provide:
+
+```
+Protocol:
+[ AVR ISP ▼ ]
+```
+
+Options initially:
+
+- AVR ISP
+- SPI Memory
+- I²C Memory
+
+Future protocols must be easy to add.
+
+Each protocol should implement a common interface such as:
+
+```
+connect()
+detect()
+read()
+write()
+verify()
+erase()
+close()
+```
+
+Only expose operations that the selected device actually supports.
+
+---
+
+# 6. AVR ISP SUPPORT
+
+Implement proper AVR ISP functionality based on the supplied ArduinoISP firmware.
+
+Support:
+
+- Target reset
+- Enter programming mode
+- Read device signature
+- Detect device
+- Determine memory size when supported
+- Read Flash
+- Read EEPROM
+- Write Flash
+- Write EEPROM
+- Verify Flash
+- Verify EEPROM
+- Exit programming mode
+
+The GUI must not assume every AVR has the same Flash/EEPROM size.
+
+Use the detected device parameters whenever available.
+
+The existing firmware's Flash read mechanism should be preserved. The supplied firmware reads Flash using the AVR read instructions and streams the resulting bytes through the serial interface.
+
+---
+
+# 7. SPI MEMORY SUPPORT
+
+Create a separate SPI-memory protocol module.
+
+The design should support common SPI memory concepts such as:
+
+- Chip Select
+- SPI clock
+- Read command
+- Write command
+- Write enable
+- Status register
+- Page programming
+- Address size
+- Read ID / JEDEC ID where supported
+- Erase where supported
+
+Do not hard-code one specific memory size.
+
+Create a device definition/configuration system so devices can specify:
+
+- Manufacturer
+- Part number
+- JEDEC ID
+- Capacity
+- Page size
+- Address width
+- Read command
+- Write command
+- Write-enable command
+- Status-register command
+- Erase commands
+
+---
+
+# 8. I²C MEMORY SUPPORT
+
+Create a separate I²C-memory protocol module.
+
+Support configurable:
+
+- I²C address
+- Memory size
+- Address width
+- Page size
+- Read operation
+- Write operation
+- Write-cycle handling
+- Device scan
+- Verification
+
+The GUI should provide an I²C device scan option where appropriate.
+
+---
+
+# 9. READ DUMP FUNCTION
+
+This is a critical requirement.
+
+When the user clicks:
+
+```
+READ FLASH
+```
+
+the software must:
+
+1. Detect/validate the target.
+2. Enter programming mode.
+3. Read the complete selected memory.
+4. Store the bytes in an in-memory buffer.
+5. Update the hex viewer progressively or safely after chunks.
+6. Update progress percentage.
+7. Calculate checksum/hash after completion.
+8. Allow the user to save the dump.
+
+For:
+
+```
+READ ALL
+```
+
+read all supported memory areas and keep them separately.
+
+Example:
+
+```
+flash.bin
+eeprom.bin
+```
+
+Do not overwrite an existing dump without asking the user.
+
+---
+
+# 10. BIN FILE SUPPORT
+
+Provide:
+
+### Save Dump
+
+Allow:
+
+```
+Save Flash Dump → .bin
+Save EEPROM Dump → .bin
+```
+
+Also provide:
+
+```
+Save As...
+```
+
+The application should remember the last-used directory.
+
+When saving, show:
+
+- File size
+- Memory type
+- Device
+- Signature
+- SHA-256 checksum
+
+---
+
+# 11. LOAD BIN
+
+Allow the user to load an existing `.bin`.
+
+After loading:
+
+- Display file size.
+- Display hex contents.
+- Show checksum.
+- Validate against target memory size before programming.
+- Warn if the file is larger than the target memory.
+
+Never silently truncate a file.
+
+---
+
+# 12. WRITE / PROGRAM
+
+When the user selects:
+
+```
+WRITE
+```
+
+the application must:
+
+1. Require a loaded binary or selected memory buffer.
+2. Detect/validate target.
+3. Validate size.
+4. Ask for confirmation before programming.
+5. Program the device.
+6. Display progress.
+7. Report errors precisely.
+8. Optionally perform automatic verification.
+
+Recommended workflow:
+
+```
+Detect
+  ↓
+Load BIN
+  ↓
+Validate size
+  ↓
+Write
+  ↓
+Verify
+  ↓
+SUCCESS
+```
+
+---
+
+# 13. VERIFY
+
+Implement byte-by-byte or block verification.
+
+Show:
+
+```
+VERIFYING...
+```
+
+If successful:
+
+```
+✓ Verification successful
+```
+
+If failed:
+
+```
+✗ Verification failed
+Address: 0x0012A4
+Expected: FF
+Read:     7E
+```
+
+Make the mismatch information useful for debugging.
+
+---
+
+# 14. HEX VIEWER
+
+Create a professional hex viewer.
+
+Display:
+
+```
+Address     Hexadecimal bytes                  ASCII
+00000000    FF 00 7A 19 34 88 ...              ..z.4.
+00000010    45 A2 11 00 FF ...                 E....
+```
+
+Features:
+
+- Scroll
+- Large dump support
+- Address display
+- Hex display
+- ASCII display
+- Search byte sequence
+- Go to address
+- Copy selected bytes
+- Optional edit mode
+- Highlight differences
+- Show file size
+
+Do not load extremely large files in a way that makes the GUI unusable.
+
+---
+
+# 15. DUMP COMPARISON
+
+Provide:
+
+```
+Compare BIN
+```
+
+Allow two binary files to be compared.
+
+Show:
+
+- Same/different
+- Number of differing bytes
+- First mismatch
+- Last mismatch
+- Difference addresses
+- Expected byte
+- Actual byte
+
+Example:
+
+```
+Difference count: 12
+
+Address     File A    File B
+0x001020    FF        00
+0x001021    A4        A5
+```
+
+Provide optional visual highlighting in the hex viewer.
+
+---
+
+# 16. LOGGING
+
+Create a professional log console.
+
+Example:
+
+```
+[10:31:02] INFO  Connected to COM5
+[10:31:03] INFO  Protocol: AVR ISP
+[10:31:03] INFO  Signature: 1E 95 0F
+[10:31:04] INFO  Flash size: 32768 bytes
+[10:31:04] INFO  Reading Flash...
+[10:31:07] INFO  Read complete
+[10:31:07] INFO  SHA-256: ...
+```
+
+Use log levels:
+
+- INFO
+- SUCCESS
+- WARNING
+- ERROR
+
+Provide:
+
+```
+Clear Log
+Save Log
+```
+
+---
+
+# 17. SAFETY / CONFIRMATION
+
+Operations that modify target memory must require confirmation.
+
+Before WRITE:
+
+```
+Target: ATmega328P
+Memory: Flash
+Size: 32768 bytes
+File: firmware.bin
+
+[ CANCEL ] [ PROGRAM ]
+```
+
+Before ERASE:
+
+```
+WARNING:
+This operation will erase the target memory.
+
+[ CANCEL ] [ ERASE ]
+```
+
+Do not accidentally write to a target.
+
+---
+
+# 18. ERROR HANDLING
+
+Handle:
+
+- No Arduino connected
+- Wrong COM port
+- Serial timeout
+- Target not connected
+- Target not responding
+- Invalid signature
+- Unsupported device
+- Invalid BIN size
+- Write failure
+- Verify failure
+- SPI communication error
+- I²C communication error
+- User cancellation
+
+Every error should provide a useful explanation rather than a Python traceback.
+
+---
+
+# 19. DEVICE DATABASE
+
+Create a device database/configuration layer.
+
+Do not put all device definitions directly inside the GUI.
+
+Example concept:
+
+```
+devices/
+    avr_devices.json
+    spi_devices.json
+    i2c_devices.json
+```
+
+Each device definition can contain:
+
+```
+name
+manufacturer
+protocol
+id/signature
+memory
+size
+page_size
+address_width
+commands
+```
+
+The system should allow new devices to be added without modifying the main GUI.
+
+---
+
+# 20. ARDUINO FIRMWARE
+
+Create `universal_programmer.ino`.
+
+The firmware should provide a clean serial command protocol for the GUI.
+
+Use a robust framed protocol rather than relying on arbitrary text commands.
+
+Example concept:
+
+```
+HEADER
+COMMAND
+LENGTH
+PAYLOAD
+CHECKSUM
+```
+
+Commands should include concepts such as:
+
+```
+GET_VERSION
+GET_STATUS
+SELECT_PROTOCOL
+AVR_DETECT
+AVR_READ
+AVR_WRITE
+AVR_VERIFY
+SPI_DETECT
+SPI_READ
+SPI_WRITE
+SPI_VERIFY
+I2C_SCAN
+I2C_READ
+I2C_WRITE
+```
+
+The exact protocol should be documented.
+
+Do not transmit large dumps as uncontrolled text.
+
+Use binary packets for data transfer.
+
+---
+
+# 21. DATA INTEGRITY
+
+Implement:
+
+- Packet length validation
+- Timeout
+- Checksum/CRC
+- Sequence number where useful
+- ACK/ERROR responses
+- Chunked transfer
+
+The PC application must detect corrupted or incomplete data.
+
+---
+
+# 22. CANCELLATION
+
+Long operations must support:
+
+```
+CANCEL
+```
+
+For example:
+
+```
+Reading...
+███████████░░░░ 63%
+
+[ CANCEL ]
+```
+
+When cancelled:
+
+- Stop safely.
+- Exit target programming mode where possible.
+- Restore Arduino state.
+- Report that the operation was cancelled.
+
+---
+
+# 23. DEVICE DETECTION
+
+Create a clear detection workflow.
+
+Example:
+
+```
+CONNECT
+   ↓
+SELECT PROTOCOL
+   ↓
+DETECT DEVICE
+   ↓
+READ ID/SIGNATURE
+   ↓
+LOAD DEVICE PROFILE
+   ↓
+SHOW MEMORY INFORMATION
+```
+
+Do not pretend a device is detected when the hardware did not respond.
+
+---
+
+# 24. CODE QUALITY
+
+The implementation must be:
+
+- Clean
+- Modular
+- Readable
+- Well commented
+- PEP8-compatible where practical
+- Exception-safe
+- Thread-safe for GUI operations
+- Easy to maintain
+- Easy to extend
+
+Avoid a single huge Python file.
+
+Do not put protocol logic inside Tkinter event handlers.
+
+---
+
+# 25. WINDOWS SUPPORT
+
+Primary target:
+
+```
+Windows 10 / Windows 11
+```
+
+Use:
+
+```
+Python 3.x
+Tkinter
+pyserial
+```
+
+Avoid unnecessary dependencies.
+
+Provide:
+
+```
+requirements.txt
+```
+
+and clear installation instructions.
+
+---
+
+# 26. USER EXPERIENCE
+
+The application should feel similar to a professional programmer utility.
+
+Use clear terminology:
+
+```
+Connect
+Detect
+Read
+Write
+Verify
+Erase
+Save Dump
+Load BIN
+Compare
+Cancel
+```
+
+Show the current operation prominently.
+
+Never leave the user wondering whether the programmer is still working.
+
+---
+
+# 27. TESTING
+
+Provide a test plan.
+
+Test at minimum:
+
+1. Arduino connection
+2. AVR detection
+3. AVR Flash read
+4. AVR EEPROM read
+5. Save BIN
+6. Load BIN
+7. Flash write
+8. Verify
+9. SPI detection
+10. SPI read/write
+11. I²C scan
+12. I²C read/write
+13. Invalid BIN
+14. Disconnect during operation
+15. Communication timeout
+16. Cancel during read
+17. Compare two BIN files
+
+---
+
+# 28. DELIVERABLES
+
+Produce the project as a complete working application.
+
+Deliver:
+
+```
+1. Python GUI
+2. Arduino firmware
+3. Protocol implementation
+4. Device database
+5. BIN read/write support
+6. Hex viewer
+7. Verify system
+8. Compare system
+9. Logging
+10. Error handling
+11. README
+12. requirements.txt
+13. Wiring diagrams/documentation
+14. Example configuration files
+```
+
+---
+
+# 29. DEVELOPMENT PRIORITY
+
+Do NOT attempt to implement everything at once.
+
+Develop in phases.
+
+### Phase 1
+
+Arduino communication + professional Tkinter GUI.
+
+### Phase 2
+
+AVR ISP:
+
+```
+Detect
+Read Flash
+Save BIN
+Load BIN
+Write
+Verify
+```
+
+### Phase 3
+
+AVR EEPROM.
+
+### Phase 4
+
+SPI memory.
+
+### Phase 5
+
+I²C memory.
+
+### Phase 6
+
+Hex viewer improvements.
+
+### Phase 7
+
+BIN comparison.
+
+### Phase 8
+
+Device database and automatic device detection.
+
+### Phase 9
+
+Packaging for Windows.
+
+At every phase, keep the previously working functionality intact.
+
+---
+
+# 30. CRITICAL REQUIREMENT
+
+The most important requirement is:
+
+**READ FROM TARGET DEVICE → STORE THE ACTUAL BYTES → DISPLAY THE DUMP → SAVE THE ACTUAL DUMP AS&#x20;****`.BIN`****.**
+
+The application must not merely show a simulated dump or generate placeholder data.
+
+The bytes saved to the `.bin` file must be the actual bytes received from the target device.
+
+Likewise, when programming a device, the bytes sent must come from the selected binary buffer/file.
+
+---
+
+# FINAL INSTRUCTION
+
+First analyze the supplied ArduinoISP firmware and reuse its working AVR ISP implementation where appropriate.
+
+Then build the project incrementally.
+
+Before adding advanced features, make this basic workflow fully reliable:
+
+```
+Arduino
+   ↓
+Target AVR
+   ↓
+Detect
+   ↓
+Read Flash
+   ↓
+Receive actual bytes
+   ↓
+Display Hex
+   ↓
+Save .BIN
+```
+
+Only after this works correctly should SPI/I²C and advanced features be added.
+
+Do not claim a function works until its communication path and data handling are actually implemented and tested.
