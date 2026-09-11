@@ -1,0 +1,155 @@
+[
+  {
+    "name": "ATmega328P",
+    "part_number": "ATmega328P",
+    "manufacturer": "Microchip",
+    "signature": "1E 95 0F",
+    "flash_size": 32768,
+    "eeprom_size": 1024,
+    "page_size": 128,
+    "protocol": "AVR ISP",
+    "description": "32KB Flash, 1KB EEPROM, 2KB SRAM"
+  },
+  {
+    "name": "ATmega328",
+    "part_number": "ATmega328",
+    "manufacturer": "Microchip",
+    "signature": "1E 95 14",
+    "flash_size": 32768,
+    "eeprom_size": 1024,
+    "page_size": 128,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega168P",
+    "part_number": "ATmega168P",
+    "manufacturer": "Microchip",
+    "signature": "1E 94 0B",
+    "flash_size": 16384,
+    "eeprom_size": 512,
+    "page_size": 128,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega168",
+    "part_number": "ATmega168",
+    "manufacturer": "Microchip",
+    "signature": "1E 94 06",
+    "flash_size": 16384,
+    "eeprom_size": 512,
+    "page_size": 128,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega8A",
+    "part_number": "ATmega8A",
+    "manufacturer": "Microchip",
+    "signature": "1E 93 07",
+    "flash_size": 8192,
+    "eeprom_size": 512,
+    "page_size": 64,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega16A",
+    "part_number": "ATmega16A",
+    "manufacturer": "Microchip",
+    "signature": "1E 94 03",
+    "flash_size": 16384,
+    "eeprom_size": 512,
+    "page_size": 128,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega32A",
+    "part_number": "ATmega32A",
+    "manufacturer": "Microchip",
+    "signature": "1E 95 02",
+    "flash_size": 32768,
+    "eeprom_size": 1024,
+    "page_size": 128,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATtiny85",
+    "part_number": "ATtiny85",
+    "manufacturer": "Microchip",
+    "signature": "1E 93 0B",
+    "flash_size": 8192,
+    "eeprom_size": 512,
+    "page_size": 64,
+    "protocol": "AVR ISP",
+    "description": "8KB Flash, 512B EEPROM, 512B SRAM - Requires slow SPI clock"
+  },
+  {
+    "name": "ATtiny84",
+    "part_number": "ATtiny84",
+    "manufacturer": "Microchip",
+    "signature": "1E 93 0C",
+    "flash_size": 8192,
+    "eeprom_size": 512,
+    "page_size": 64,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATtiny2313A",
+    "part_number": "ATtiny2313A",
+    "manufacturer": "Microchip",
+    "signature": "1E 91 0A",
+    "flash_size": 2048,
+    "eeprom_size": 128,
+    "page_size": 32,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATtiny13A",
+    "part_number": "ATtiny13A",
+    "manufacturer": "Microchip",
+    "signature": "1E 90 07",
+    "flash_size": 1024,
+    "eeprom_size": 64,
+    "page_size": 32,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega2560",
+    "part_number": "ATmega2560",
+    "manufacturer": "Microchip",
+    "signature": "1E 98 01",
+    "flash_size": 262144,
+    "eeprom_size": 4096,
+    "page_size": 256,
+    "protocol": "AVR ISP",
+    "description": "256KB Flash - Requires special handling for >64KB"
+  },
+  {
+    "name": "ATmega1280",
+    "part_number": "ATmega1280",
+    "manufacturer": "Microchip",
+    "signature": "1E 97 03",
+    "flash_size": 131072,
+    "eeprom_size": 4096,
+    "page_size": 256,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega644P",
+    "part_number": "ATmega644P",
+    "manufacturer": "Microchip",
+    "signature": "1E 96 0A",
+    "flash_size": 65536,
+    "eeprom_size": 2048,
+    "page_size": 256,
+    "protocol": "AVR ISP"
+  },
+  {
+    "name": "ATmega1284P",
+    "part_number": "ATmega1284P",
+    "manufacturer": "Microchip",
+    "signature": "1E 97 05",
+    "flash_size": 131072,
+    "eeprom_size": 4096,
+    "page_size": 256,
+    "protocol": "AVR ISP"
+  }
+]

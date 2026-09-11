@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+*.bin
+*.hex
+.DS_Store
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Project specific
+*.bin
+!examples/*.bin
+dumps/
+logs/
+*.dump
+
+# Arduino
+*.hex
+*.elf
+*.eep
+*.lst
+*.sym
+*.lss
+*.o
+*.a
+*.d
+*.o.d

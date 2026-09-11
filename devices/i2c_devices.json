@@ -1,0 +1,124 @@
+[
+  {
+    "name": "24C01",
+    "part_number": "24C01",
+    "manufacturer": "Generic",
+    "capacity": 128,
+    "capacity_str": "128 Bytes",
+    "page_size": 8,
+    "addr_width": 1,
+    "i2c_address": "0x50",
+    "description": "1Kbit EEPROM"
+  },
+  {
+    "name": "24C02",
+    "part_number": "24C02",
+    "manufacturer": "Generic",
+    "capacity": 256,
+    "capacity_str": "256 Bytes",
+    "page_size": 8,
+    "addr_width": 1,
+    "i2c_address": "0x50",
+    "description": "2Kbit EEPROM"
+  },
+  {
+    "name": "24C04",
+    "part_number": "24C04",
+    "manufacturer": "Generic",
+    "capacity": 512,
+    "capacity_str": "512 Bytes",
+    "page_size": 16,
+    "addr_width": 1,
+    "i2c_address": "0x50",
+    "description": "4Kbit EEPROM"
+  },
+  {
+    "name": "24C08",
+    "part_number": "24C08",
+    "manufacturer": "Generic",
+    "capacity": 1024,
+    "capacity_str": "1KB",
+    "page_size": 16,
+    "addr_width": 1,
+    "i2c_address": "0x50",
+    "description": "8Kbit EEPROM"
+  },
+  {
+    "name": "24C16",
+    "part_number": "24C16",
+    "manufacturer": "Generic",
+    "capacity": 2048,
+    "capacity_str": "2KB",
+    "page_size": 16,
+    "addr_width": 1,
+    "i2c_address": "0x50",
+    "description": "16Kbit EEPROM"
+  },
+  {
+    "name": "24C32",
+    "part_number": "24C32",
+    "manufacturer": "Generic",
+    "capacity": 4096,
+    "capacity_str": "4KB",
+    "page_size": 32,
+    "addr_width": 2,
+    "i2c_address": "0x50",
+    "description": "32Kbit EEPROM"
+  },
+  {
+    "name": "24C64",
+    "part_number": "24C64",
+    "manufacturer": "Generic",
+    "capacity": 8192,
+    "capacity_str": "8KB",
+    "page_size": 32,
+    "addr_width": 2,
+    "i2c_address": "0x50",
+    "description": "64Kbit EEPROM"
+  },
+  {
+    "name": "24C128",
+    "part_number": "24C128",
+    "manufacturer": "Generic",
+    "capacity": 16384,
+    "capacity_str": "16KB",
+    "page_size": 64,
+    "addr_width": 2,
+    "i2c_address": "0x50",
+    "description": "128Kbit EEPROM"
+  },
+  {
+    "name": "24C256",
+    "part_number": "24C256",
+    "manufacturer": "Generic",
+    "capacity": 32768,
+    "capacity_str": "32KB",
+    "page_size": 64,
+    "addr_width": 2,
+    "i2c_address": "0x50",
+    "default": true,
+    "description": "256Kbit EEPROM - Most common"
+  },
+  {
+    "name": "24C512",
+    "part_number": "24C512",
+    "manufacturer": "Generic",
+    "capacity": 65536,
+    "capacity_str": "64KB",
+    "page_size": 128,
+    "addr_width": 2,
+    "i2c_address": "0x50",
+    "description": "512Kbit EEPROM"
+  },
+  {
+    "name": "24C1024",
+    "part_number": "24C1024",
+    "manufacturer": "Generic",
+    "capacity": 131072,
+    "capacity_str": "128KB",
+    "page_size": 256,
+    "addr_width": 2,
+    "i2c_address": "0x50",
+    "description": "1024Kbit EEPROM"
+  }
+]
