@@ -72,6 +72,8 @@ class SerialManager:
                 self._timeout = timeout
 
             try:
+                # For Arduino Uno, opening serial triggers reset via DTR
+                # We handle this by waiting for bootloader to finish
                 self._serial = serial.Serial(
                     port=port,
                     baudrate=baud,
@@ -84,14 +86,34 @@ class SerialManager:
                     rtscts=False,
                     dsrdtr=False
                 )
-                # Allow Arduino to reset (if using Uno with auto-reset)
-                time.sleep(0.2)
-                # Clear buffers
-                self._serial.reset_input_buffer()
-                self._serial.reset_output_buffer()
-                # Extra delay for ESP32 boot
-                time.sleep(1.5)
-                self._serial.reset_input_buffer()
+                # Critical: Arduino Uno resets on serial open and bootloader waits ~1-2 seconds
+                # We need to wait for it to finish before communicating
+                # Also need to handle both old bootloader (1.5s) and new (0.5s) and ESP32 (1s)
+                time.sleep(0.5)
+                # Clear any bootloader output or garbage
+                try:
+                    self._serial.reset_input_buffer()
+                    self._serial.reset_output_buffer()
+                except Exception:
+                    pass
+
+                # Wait for Arduino to be ready - total 2.5 seconds from open
+                # This covers Uno reset + bootloader + firmware init
+                time.sleep(2.0)
+
+                # Flush again after boot
+                try:
+                    # Read and discard any boot garbage
+                    self._serial.timeout = 0.5
+                    while True:
+                        data = self._serial.read(1024)
+                        if not data:
+                            break
+                    self._serial.timeout = self._timeout
+                    self._serial.reset_input_buffer()
+                    self._serial.reset_output_buffer()
+                except Exception:
+                    pass
 
                 self._port = port
                 self._baud = baud

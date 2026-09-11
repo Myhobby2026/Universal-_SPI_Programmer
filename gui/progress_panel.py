@@ -79,13 +79,21 @@ class ProgressPanel(ttk.LabelFrame):
         if detail is not None:
             self.detail_var.set(detail)
 
-        # Change color based on status
-        if "error" in (status or "").lower() or "failed" in (status or "").lower():
-            self.progress_bar.configure(style='Error.TProgressbar')
-        elif "success" in (status or "").lower() or percent == 100:
-            self.progress_bar.configure(style='Success.TProgressbar')
-        else:
-            self.progress_bar.configure(style='TProgressbar')
+        # Change color based on status - use try/except to handle missing style layouts
+        # On some Tk versions, custom Progressbar styles need explicit layout
+        try:
+            if "error" in (status or "").lower() or "failed" in (status or "").lower():
+                self.progress_bar.configure(style='Error.TProgressbar')
+            elif "success" in (status or "").lower() or percent == 100:
+                self.progress_bar.configure(style='Success.TProgressbar')
+            else:
+                self.progress_bar.configure(style='TProgressbar')
+        except Exception:
+            # Fallback: keep default style if custom style layout not found
+            try:
+                self.progress_bar.configure(style='TProgressbar')
+            except Exception:
+                pass
 
     def set_idle(self):
         self.set_progress(0, "Idle", "")

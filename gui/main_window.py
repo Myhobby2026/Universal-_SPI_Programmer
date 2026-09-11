@@ -500,27 +500,53 @@ class MainWindow:
             self.log_console.log(f"Protocol {protocol_name} not implemented", "WARNING")
 
     def on_connected(self, port, baud):
-        """Called when serial connected"""
+        """Called when serial connected - robust version with retries"""
         self.log_console.log(f"Connected to {port} at {baud} baud", "SUCCESS")
+        self.log_console.log("Waiting for Arduino to boot...", "INFO")
 
-        # Try to get firmware version
+        # Try to get firmware version with robust retry
         def get_version_thread():
             try:
-                time.sleep(0.5)
-                version = self.arduino_interface.get_version()
-                self.root.after(0, lambda: self.connection_panel.set_connected(True, version))
-                self.root.after(0, lambda: self.log_console.log(f"Firmware version: {version}", "INFO"))
+                # Give extra time for Arduino to boot after our serial_manager's 2.5s
+                time.sleep(1.0)
 
-                # Try ping
-                if self.arduino_interface.ping():
-                    self.root.after(0, lambda: self.log_console.log("Communication test: OK", "SUCCESS"))
-                else:
-                    self.root.after(0, lambda: self.log_console.log("Ping failed - check firmware", "WARNING"))
+                # Try ping first with multiple attempts
+                self.root.after(0, lambda: self.log_console.log("Testing communication (PING)...", "INFO"))
+                ping_ok = False
+                for attempt in range(5):
+                    try:
+                        if self.arduino_interface.ping():
+                            ping_ok = True
+                            break
+                    except Exception as e:
+                        self.root.after(0, lambda err=str(e): self.log_console.log(f"PING attempt {attempt+1} failed: {err}", "WARNING"))
+                    time.sleep(0.5)
+
+                if not ping_ok:
+                    self.root.after(0, lambda: self.log_console.log(
+                        "PING failed after 5 attempts. Possible causes:\n"
+                        "1) Wrong firmware - upload arduino/universal_programmer.ino (not old ArduinoISP)\n"
+                        "2) Wrong baud - use 115200\n"
+                        "3) Arduino auto-reset - try 10uF cap between RESET and GND\n"
+                        "4) Check wiring and COM port", "ERROR"))
+                    self.root.after(0, lambda: self.operations_panel.set_enabled(True))
+                    return
+
+                self.root.after(0, lambda: self.log_console.log("Communication test: OK", "SUCCESS"))
+
+                # Now get version
+                try:
+                    version = self.arduino_interface.get_version()
+                    self.root.after(0, lambda: self.connection_panel.set_connected(True, version))
+                    self.root.after(0, lambda: self.log_console.log(f"Firmware version: {version}", "INFO"))
+                except Exception as e:
+                    self.root.after(0, lambda: self.log_console.log(f"Version check failed (but PING OK): {e}", "WARNING"))
+                    self.root.after(0, lambda: self.connection_panel.set_connected(True, "Unknown"))
 
                 self.root.after(0, lambda: self.operations_panel.set_enabled(True))
 
             except Exception as e:
-                self.root.after(0, lambda: self.log_console.log(f"Version check failed: {e}", "WARNING"))
+                self.root.after(0, lambda err=str(e): self.log_console.log(f"Connection test failed: {err}", "ERROR"))
                 self.root.after(0, lambda: self.operations_panel.set_enabled(True))
 
         threading.Thread(target=get_version_thread, daemon=True).start()
@@ -575,17 +601,20 @@ class MainWindow:
             self.log_console.log(f"Unknown operation: {operation}", "ERROR")
 
     def _run_operation(self, func, op_name):
-        """Run operation in worker thread with error handling"""
+        """Run operation in worker thread with error handling - robust lambda capture"""
         try:
-            self.root.after(0, lambda: self.progress_panel.set_busy(f"{op_name.upper()}..."))
-            self.root.after(0, lambda: self.status_var.set(f"Running {op_name}..."))
+            # Capture op_name safely
+            self.root.after(0, lambda n=op_name: self.progress_panel.set_busy(f"{n.upper()}..."))
+            self.root.after(0, lambda n=op_name: self.status_var.set(f"Running {n}..."))
             func()
         except Exception as e:
-            self.root.after(0, lambda: self.log_console.log(f"{op_name} failed: {e}", "ERROR"))
-            self.root.after(0, lambda: self.progress_panel.set_error(f"Failed: {e}"))
-            self.root.after(0, lambda: self.status_var.set(f"Error: {e}"))
+            err_msg = str(e)
+            op = op_name
+            # Use default args to capture values safely for after() callbacks
+            self.root.after(0, lambda m=err_msg, o=op: self.log_console.log(f"{o} failed: {m}", "ERROR"))
+            self.root.after(0, lambda m=err_msg: self.progress_panel.set_error(f"Failed: {m[:150]}"))
+            self.root.after(0, lambda m=err_msg: self.status_var.set(f"Error: {m[:100]}"))
         finally:
-            # Ensure progress is not stuck
             pass
 
     def _progress_callback(self, percent: int, message: str):
@@ -638,12 +667,24 @@ class MainWindow:
             self.root.after(0, update_ui)
 
         except DeviceNotDetectedError as e:
-            self.root.after(0, lambda: self.log_console.log(f"Detection failed: {e}", "ERROR"))
-            self.root.after(0, lambda: self.progress_panel.set_error(f"Not detected: {e}"))
+            self.root.after(0, lambda err=str(e): self.log_console.log(f"Detection failed: {err}", "ERROR"))
+            self.root.after(0, lambda err=str(e): self.progress_panel.set_error(f"Not detected: {err}"))
             self.root.after(0, lambda: self.device_panel.clear())
         except Exception as e:
-            self.root.after(0, lambda: self.log_console.log(f"Detection error: {e}", "ERROR"))
-            self.root.after(0, lambda: self.progress_panel.set_error(f"Error: {e}"))
+            err_str = str(e)
+            # Provide helpful hint for protocol select timeout
+            if "0x03" in err_str or "protocol 1" in err_str.lower() or "Timeout waiting for response header" in err_str:
+                self.root.after(0, lambda: self.log_console.log(
+                    f"Detection error: {err_str}\n"
+                    "HINT: This is usually firmware mismatch. Please:\n"
+                    "1) Open Arduino IDE\n"
+                    "2) Open arduino/universal_programmer.ino from this project\n"
+                    "3) Select your board (Uno/Nano/ESP32) and COM port\n"
+                    "4) Upload the firmware\n"
+                    "5) Reconnect in GUI (baud 115200)", "ERROR"))
+            else:
+                self.root.after(0, lambda err=err_str: self.log_console.log(f"Detection error: {err}", "ERROR"))
+            self.root.after(0, lambda err=err_str: self.progress_panel.set_error(f"Error: {err[:100]}"))
         finally:
             try:
                 if self.current_protocol_obj:

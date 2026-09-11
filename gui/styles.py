@@ -117,15 +117,43 @@ def apply_styles(root, use_dark=False):
                     foreground=colors['text_primary'],
                     insertcolor=colors['text_primary'])
 
-    # Progressbar
+    # Progressbar - define base and ensure custom styles inherit layout
     style.configure('TProgressbar', background=colors['progress_fg'],
                     troughcolor=colors['progress_bg'],
                     bordercolor=colors['border'],
                     lightcolor=colors['progress_fg'],
                     darkcolor=colors['progress_fg'])
 
-    style.configure('Success.TProgressbar', background=colors['success'])
-    style.configure('Error.TProgressbar', background=colors['error'])
+    # For custom progressbar styles, copy layout from TProgressbar to avoid TclError
+    # Layout "Horizontal.Error.TProgressbar" not found happens when style has no layout
+    try:
+        base_layout = style.layout('TProgressbar')
+        style.layout('Success.TProgressbar', base_layout)
+        style.layout('Error.TProgressbar', base_layout)
+    except Exception:
+        # Fallback: try Horizontal layout name (some themes use Horizontal.TProgressbar)
+        try:
+            base_layout = style.layout('Horizontal.TProgressbar')
+            style.layout('Horizontal.Success.TProgressbar', base_layout)
+            style.layout('Horizontal.Error.TProgressbar', base_layout)
+            # Also try without Horizontal prefix for safety
+            style.layout('Success.TProgressbar', base_layout)
+            style.layout('Error.TProgressbar', base_layout)
+        except Exception:
+            pass
+
+    style.configure('Success.TProgressbar', background=colors['success'],
+                    troughcolor=colors['progress_bg'])
+    style.configure('Error.TProgressbar', background=colors['error'],
+                    troughcolor=colors['progress_bg'])
+    # Also configure Horizontal variants
+    try:
+        style.configure('Horizontal.Success.TProgressbar', background=colors['success'],
+                        troughcolor=colors['progress_bg'])
+        style.configure('Horizontal.Error.TProgressbar', background=colors['error'],
+                        troughcolor=colors['progress_bg'])
+    except Exception:
+        pass
 
     # Labelframe
     style.configure('TLabelframe', background=colors['bg_secondary'],

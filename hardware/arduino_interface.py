@@ -168,32 +168,65 @@ class ArduinoInterface:
         Read and parse a response packet
         Returns (cmd, seq, payload)
         Raises ArduinoInterfaceError on failure
+        Improved robustness: handles bootloader garbage, STK500 text, and sync issues
         """
         start_time = time.time()
         buffer = bytearray()
+        debug_bytes = bytearray()  # For error reporting
 
         # State machine to find header
         while True:
-            if time.time() - start_time > timeout:
-                raise ArduinoTimeoutError("Timeout waiting for response header")
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                # Provide helpful debug info
+                if len(debug_bytes) > 0:
+                    # Show first 50 bytes received for debugging
+                    preview = debug_bytes[:100].hex(' ')
+                    raise ArduinoTimeoutError(
+                        f"Timeout waiting for response header after {timeout}s. "
+                        f"Received {len(debug_bytes)} bytes: {preview[:200]}... "
+                        f"Check: 1) Firmware uploaded? 2) Correct baud (115200)? 3) Arduino auto-reset? "
+                        f"Try disconnect/reconnect and check firmware version."
+                    )
+                else:
+                    raise ArduinoTimeoutError(
+                        f"Timeout waiting for response header after {timeout}s. No data received. "
+                        f"Check: 1) Firmware is universal_programmer.ino (not old ArduinoISP) 2) Baud 115200 3) COM port correct"
+                    )
 
             # Read available data
-            if self.serial.is_connected():
-                # Try to read 1 byte at a time to sync
-                chunk = self.serial.read(1, timeout=0.1)
-                if not chunk:
-                    continue
-                buffer.extend(chunk)
-            else:
+            if not self.serial.is_connected():
                 raise ArduinoInterfaceError("Not connected")
 
-            # Look for header in buffer
-            # Keep buffer limited to avoid growing infinitely
-            if len(buffer) > 4096:
-                # Discard oldest bytes, keep last 4
-                del buffer[:-4]
+            # Try to read more aggressively - read all available first
+            try:
+                # First try to read any available bytes without blocking long
+                available = self.serial.read_available()
+                if available:
+                    buffer.extend(available)
+                    debug_bytes.extend(available)
+                else:
+                    # No data available, try blocking read of 1 byte with short timeout
+                    chunk = self.serial.read(1, timeout=0.2)
+                    if chunk:
+                        buffer.extend(chunk)
+                        debug_bytes.extend(chunk)
+                    else:
+                        # No data, continue waiting
+                        time.sleep(0.01)
+                        continue
+            except Exception:
+                # On read error, continue
+                time.sleep(0.01)
+                continue
 
-            # Search for header 0xAA 0x55
+            # Keep buffer limited to avoid growing infinitely
+            # But keep enough for debugging
+            if len(buffer) > 8192:
+                # Discard oldest bytes, keep last 1024
+                del buffer[:-1024]
+
+            # Search for header 0xAA 0x55 - may appear multiple times
             idx = -1
             for i in range(len(buffer) - 1):
                 if buffer[i] == 0xAA and buffer[i+1] == 0x55:
@@ -201,11 +234,35 @@ class ArduinoInterface:
                     break
 
             if idx == -1:
+                # No header found yet
+                # If buffer is getting large and contains STK500 text like "AVR ISP", 
+                # it means firmware is in STK500 mode (old ArduinoISP) not our framed protocol
+                # Check for STK500 markers
+                if len(buffer) > 100:
+                    try:
+                        text = buffer[-100:].decode('ascii', errors='ignore')
+                        if 'AVR ISP' in text or 'STK' in text:
+                            raise ArduinoInterfaceError(
+                                "Received STK500 text response (AVR ISP) but expected framed protocol. "
+                                "This usually means old ArduinoISP firmware is uploaded, not universal_programmer.ino. "
+                                "Please upload arduino/universal_programmer.ino from this project."
+                            )
+                    except ArduinoInterfaceError:
+                        raise
+                    except Exception:
+                        pass
                 continue
 
             # Found header at idx, ensure we have enough for minimal packet
             # Minimal packet: HEADER(2) + CMD(1) + SEQ(1) + LEN(2) + CRC(2) + FOOTER(2) = 10
             if len(buffer) - idx < 10:
+                # Need more data, but we have header - wait for more
+                # Try to read remaining with timeout
+                remaining_needed = 10 - (len(buffer) - idx)
+                more = self.serial.read(remaining_needed, timeout=0.5)
+                if more:
+                    buffer.extend(more)
+                    debug_bytes.extend(more)
                 continue
 
             # Parse length
@@ -225,13 +282,14 @@ class ArduinoInterface:
 
                 if len(buffer) - idx < total_len:
                     # Need more data
-                    # Read remaining bytes
                     remaining = total_len - (len(buffer) - idx)
                     # Try to read remaining in one go with timeout
-                    more = self.serial.read(remaining, timeout=0.5)
+                    more = self.serial.read(remaining, timeout=1.0)
                     if more:
                         buffer.extend(more)
+                        debug_bytes.extend(more)
                     if len(buffer) - idx < total_len:
+                        # Still not enough, continue waiting
                         continue
 
                 # Now we have full packet candidate
@@ -240,6 +298,10 @@ class ArduinoInterface:
                 payload_end = payload_start + payload_len
                 crc_start = payload_end
                 footer_start = crc_start + 2
+
+                # Bounds check
+                if footer_start + 1 >= len(buffer):
+                    continue
 
                 payload = bytes(buffer[payload_start:payload_end])
                 crc_l = buffer[crc_start]
@@ -270,18 +332,19 @@ class ArduinoInterface:
 
             except IndexError:
                 continue
+            except ArduinoInterfaceError:
+                raise
             except Exception as e:
                 # On any parsing error, discard header and continue
                 if idx >= 0:
                     del buffer[:idx+2]
                 continue
 
-        # Should not reach here
-
     def _send_command(self, cmd: int, payload: bytes = b'', timeout: float = 2.0, retries: int = MAX_RETRIES) -> bytes:
         """
         Send command and wait for response
         Returns response payload (including status byte)
+        Improved robustness for initial connection and bootloader
         """
         with self._lock:
             if not self.serial.is_connected():
@@ -293,12 +356,24 @@ class ArduinoInterface:
                 packet = self._build_packet(cmd, payload, seq)
 
                 try:
-                    # Flush before sending
-                    self.serial.flush()
-                    self.serial.write(packet)
+                    # For first attempt, give extra time for Arduino to be ready
+                    # Clear any stale data before sending
+                    try:
+                        self.serial.flush()
+                        # Small delay to let firmware settle
+                        time.sleep(0.05)
+                        # Discard any pending input
+                        self.serial.read_available()
+                    except Exception:
+                        pass
 
-                    # Read response
-                    resp_cmd, resp_seq, resp_payload = self._read_packet(timeout=timeout)
+                    self.serial.write(packet)
+                    # Give firmware time to process
+                    time.sleep(0.02)
+
+                    # Read response - use longer timeout for first attempt
+                    read_timeout = timeout + (1.0 if attempt == 0 else 0)
+                    resp_cmd, resp_seq, resp_payload = self._read_packet(timeout=read_timeout)
 
                     # Check if response matches our command (resp_cmd should be cmd|0x80)
                     expected_resp = cmd | 0x80

@@ -1,10 +1,16 @@
 /*
- * Universal Programmer Firmware
+ * Universal Programmer Firmware v1.0.1 - Robust Edition
  * Professional Grade - Supports AVR ISP, SPI Memory, I2C Memory
  *
  * Based on ArduinoISP sketch (Copyright 2008-2011 Randall Bohn)
  * Preserves original AVR ISP functionality (STK500v1 compatible)
  * Extends with robust framed binary protocol for GUI
+ *
+ * Fixes in v1.0.1:
+ * - Robust framed protocol parsing with circular buffer (no header loss)
+ * - STK500 getch() with timeout to avoid blocking forever
+ * - Better auto-reset handling
+ * - Improved error recovery
  *
  * Hardware:
  *   Arduino Uno / Nano / Mega / ESP32
@@ -19,7 +25,7 @@
  *   A5/SCL - I2C SCL
  *   Pin 7  - Programming LED
  *   Pin 8  - Error LED
- *   Pin 9  - Heartbeat LED (if not used as SPI CS, else use 6)
+ *   Pin 6  - Heartbeat LED
  *
  * Pinout (ESP32):
  *   GPIO 5  - AVR RESET
@@ -37,39 +43,9 @@
  *     CRC16-CCITT over CMD+SEQ+LEN+PAYLOAD
  *     Response: CMD | 0x80, first payload byte = status
  *
- *   STK500v1 compatible (for avrdude):
- *     Detects STK commands (0x30 etc) and handles as ArduinoISP
+ *   STK500v1 compatible (for avrdude)
  *
- * Commands:
- *   0x01 GET_VERSION
- *   0x02 GET_STATUS
- *   0x03 SELECT_PROTOCOL
- *   0x10 AVR_ENTER_PROG
- *   0x11 AVR_EXIT_PROG
- *   0x12 AVR_READ_SIGNATURE
- *   0x13 AVR_READ_FLASH
- *   0x14 AVR_READ_EEPROM
- *   0x15 AVR_WRITE_FLASH
- *   0x16 AVR_WRITE_EEPROM
- *   0x17 AVR_ERASE
- *   0x18 AVR_DETECT
- *   0x20 SPI_DETECT (JEDEC ID)
- *   0x21 SPI_READ
- *   0x22 SPI_WRITE
- *   0x23 SPI_ERASE
- *   0x24 SPI_GET_STATUS
- *   0x25 SPI_WRITE_ENABLE
- *   0x30 I2C_SCAN
- *   0x31 I2C_READ
- *   0x32 I2C_WRITE
- *   0x33 I2C_DETECT
- *   0x40 PING
- *   0x41 RESET_TARGET
- *   0x42 SET_CONFIG
- *
- * Author: Universal Programmer Project
- * Version: 1.0.0
- * License: BSD (compatible with ArduinoISP)
+ * Version: 1.0.1
  */
 
 #include <Arduino.h>
@@ -80,10 +56,10 @@
 // Configuration
 // =============================================================================
 
-#define FIRMWARE_VERSION "Universal Programmer v1.0.0"
+#define FIRMWARE_VERSION "Universal Programmer v1.0.1"
 #define FIRMWARE_VERSION_MAJOR 1
 #define FIRMWARE_VERSION_MINOR 0
-#define FIRMWARE_VERSION_PATCH 0
+#define FIRMWARE_VERSION_PATCH 1
 
 #define BAUDRATE 115200
 
@@ -144,11 +120,10 @@
 #define CRC_EOP 0x20
 
 // =============================================================================
-// Pin Definitions - Support both AVR Arduino and ESP32
+// Pin Definitions
 // =============================================================================
 
 #ifdef ARDUINO_ARCH_ESP32
-  // ESP32 pinout
   #define PIN_AVR_RESET 5
   #define PIN_SPI_MEM_CS 15
   #define PIN_MOSI 23
@@ -160,7 +135,6 @@
   #define LED_ERR 4
   #define LED_PMODE 16
 #else
-  // Arduino Uno/Nano/Mega
   #define PIN_AVR_RESET 10
   #define PIN_SPI_MEM_CS 9
   #define LED_HB 6
@@ -177,27 +151,21 @@
   #endif
 #endif
 
-// SPI Clock - slow enough for ATtiny85 @ 1MHz
 #define SPI_CLOCK (1000000/6)
 
 // =============================================================================
 // Global Variables
 // =============================================================================
 
-// Protocol state
 uint8_t current_protocol = PROTOCOL_NONE;
 uint8_t error_count = 0;
 uint8_t pmode = 0;
-unsigned int here; // address for STK500
-uint8_t buff[512]; // buffer for STK and framed protocol
+unsigned int here;
+uint8_t buff[512];
 
-// For framed protocol
 uint8_t seq_num = 0;
-
-// SPI settings
 SPISettings spi_settings(SPI_CLOCK, MSBFIRST, SPI_MODE0);
 
-// Parameter structure from ArduinoISP
 #define beget16(addr) (*addr * 256 + *(addr+1) )
 typedef struct param {
   uint8_t devicecode;
@@ -216,6 +184,12 @@ typedef struct param {
 } parameter;
 
 parameter param;
+
+// RX circular buffer for robust parsing
+#define RX_BUF_SIZE 1024
+uint8_t rx_buf[RX_BUF_SIZE];
+volatile uint16_t rx_head = 0;
+volatile uint16_t rx_tail = 0;
 
 // =============================================================================
 // Utility Functions
@@ -245,21 +219,62 @@ void pulse_led(int pin, int times) {
   }
 }
 
+// RX buffer helpers
+inline uint16_t rx_available() {
+  if (rx_head >= rx_tail) return rx_head - rx_tail;
+  return RX_BUF_SIZE - rx_tail + rx_head;
+}
+
+inline bool rx_is_empty() {
+  return rx_head == rx_tail;
+}
+
+inline void rx_push(uint8_t b) {
+  uint16_t next = (rx_head + 1) % RX_BUF_SIZE;
+  if (next != rx_tail) {
+    rx_buf[rx_head] = b;
+    rx_head = next;
+  }
+}
+
+inline uint8_t rx_peek(uint16_t offset) {
+  return rx_buf[(rx_tail + offset) % RX_BUF_SIZE];
+}
+
+inline uint8_t rx_pop() {
+  if (rx_is_empty()) return 0;
+  uint8_t b = rx_buf[rx_tail];
+  rx_tail = (rx_tail + 1) % RX_BUF_SIZE;
+  return b;
+}
+
+inline void rx_clear() {
+  rx_head = rx_tail = 0;
+}
+
+// Fill RX buffer from Serial
+void rx_fill_from_serial() {
+  while (Serial.available()) {
+    uint8_t b = Serial.read();
+    rx_push(b);
+    // Avoid overflow - if buffer full, drop oldest
+    if ((rx_head + 1) % RX_BUF_SIZE == rx_tail) {
+      rx_tail = (rx_tail + 1) % RX_BUF_SIZE;
+    }
+  }
+}
+
 // =============================================================================
-// Framed Protocol Implementation
+// Framed Protocol Implementation - Robust
 // =============================================================================
 
 #define FRAME_HEADER1 0xAA
 #define FRAME_HEADER2 0x55
 #define FRAME_FOOTER1 0x55
 #define FRAME_FOOTER2 0xAA
-
 #define MAX_PAYLOAD 512
-#define RX_BUFFER_SIZE 1024
 
-// Send framed response
 void send_response(uint8_t cmd, uint8_t seq, uint8_t status, const uint8_t *payload, uint16_t payload_len) {
-  // Build full payload with status byte first
   uint16_t total_len = payload_len + 1;
   if (total_len > MAX_PAYLOAD) total_len = MAX_PAYLOAD;
 
@@ -268,7 +283,7 @@ void send_response(uint8_t cmd, uint8_t seq, uint8_t status, const uint8_t *payl
 
   frame[idx++] = FRAME_HEADER1;
   frame[idx++] = FRAME_HEADER2;
-  frame[idx++] = cmd | 0x80; // Response cmd = request | 0x80
+  frame[idx++] = cmd | 0x80;
   frame[idx++] = seq;
   frame[idx++] = total_len & 0xFF;
   frame[idx++] = (total_len >> 8) & 0xFF;
@@ -281,7 +296,6 @@ void send_response(uint8_t cmd, uint8_t seq, uint8_t status, const uint8_t *payl
     idx += copy_len;
   }
 
-  // Calculate CRC over CMD+SEQ+LEN+PAYLOAD (including status)
   uint8_t crc_data[600];
   crc_data[0] = cmd | 0x80;
   crc_data[1] = seq;
@@ -312,83 +326,104 @@ void send_ok(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t len) {
   send_response(cmd, seq, STATUS_OK, payload, len);
 }
 
-// Try to parse a framed packet from serial
-// Returns true if packet parsed, false if need more data or invalid
-// This is called when we have seen 0xAA 0x55
-bool try_parse_framed_packet() {
-  // Need at least header(2) + cmd(1) + seq(1) + len(2) + crc(2) + footer(2) = 10
-  if (Serial.available() < 8) return false; // we already consumed 2 header bytes
+// Try to parse one framed packet from rx_buf
+// Returns true if packet handled, false otherwise
+bool try_parse_framed_from_buffer() {
+  // Need at least minimal packet
+  if (rx_available() < 10) return false;
 
-  // Peek next bytes without consuming? We'll read them
-  // We have already consumed 0xAA 0x55, now read CMD, SEQ, LEN
-  unsigned long timeout = millis() + 1000;
-  while (Serial.available() < 4) {
-    if (millis() > timeout) return false;
-  }
+  // Search for header AA 55
+  uint16_t search_offset = 0;
+  uint16_t avail = rx_available();
+  
+  for (uint16_t i = 0; i < avail - 1; i++) {
+    uint8_t b1 = rx_peek(i);
+    uint8_t b2 = rx_peek(i+1);
+    
+    if (b1 == FRAME_HEADER1 && b2 == FRAME_HEADER2) {
+      // Found header at offset i
+      // Check if we have enough for minimal header
+      if (avail - i < 10) return false; // need more data
 
-  uint8_t cmd = Serial.read();
-  uint8_t seq = Serial.read();
-  uint8_t len_l = Serial.read();
-  uint8_t len_h = Serial.read();
-  uint16_t payload_len = len_l | (len_h << 8);
+      uint8_t cmd = rx_peek(i+2);
+      uint8_t seq = rx_peek(i+3);
+      uint8_t len_l = rx_peek(i+4);
+      uint8_t len_h = rx_peek(i+5);
+      uint16_t payload_len = len_l | (len_h << 8);
 
-  if (payload_len > MAX_PAYLOAD) {
-    // Invalid length, flush and return
-    while (Serial.available()) Serial.read();
-    return true; // consumed invalid packet
-  }
+      if (payload_len > MAX_PAYLOAD) {
+        // Invalid length, skip this header
+        // Remove bytes up to i+2
+        for (uint16_t j = 0; j < i+2; j++) rx_pop();
+        return false;
+      }
 
-  // Wait for payload + crc + footer
-  uint16_t need = payload_len + 2 + 2;
-  timeout = millis() + 2000;
-  while (Serial.available() < need) {
-    if (millis() > timeout) {
-      return false;
+      uint16_t total_len = 2 + 1 + 1 + 2 + payload_len + 2 + 2;
+      
+      if (avail - i < total_len) {
+        // Need more data
+        return false;
+      }
+
+      // Check footer
+      uint8_t foot1 = rx_peek(i + total_len - 2);
+      uint8_t foot2 = rx_peek(i + total_len - 1);
+      
+      if (foot1 != FRAME_FOOTER1 || foot2 != FRAME_FOOTER2) {
+        // Bad footer, skip header
+        for (uint16_t j = 0; j < i+2; j++) rx_pop();
+        return false;
+      }
+
+      // Extract payload for CRC check
+      uint8_t payload[MAX_PAYLOAD];
+      for (uint16_t p = 0; p < payload_len; p++) {
+        payload[p] = rx_peek(i + 6 + p);
+      }
+
+      // Check CRC
+      uint8_t crc_data[600];
+      crc_data[0] = cmd;
+      crc_data[1] = seq;
+      crc_data[2] = len_l;
+      crc_data[3] = len_h;
+      memcpy(&crc_data[4], payload, payload_len);
+      uint16_t calc_crc = crc16_ccitt(crc_data, 4 + payload_len);
+      
+      uint8_t crc_l = rx_peek(i + 6 + payload_len);
+      uint8_t crc_h = rx_peek(i + 6 + payload_len + 1);
+      uint16_t recv_crc = crc_l | (crc_h << 8);
+
+      if (calc_crc != recv_crc) {
+        // CRC mismatch, skip header
+        for (uint16_t j = 0; j < i+2; j++) rx_pop();
+        return false;
+      }
+
+      // Valid packet! Remove preceding garbage and packet from buffer
+      for (uint16_t j = 0; j < i; j++) rx_pop(); // remove garbage before header
+      for (uint16_t j = 0; j < total_len; j++) rx_pop(); // remove packet
+
+      // Handle command
+      extern void handle_framed_command(uint8_t cmd, uint8_t seq, uint8_t *payload, uint16_t len);
+      handle_framed_command(cmd, seq, payload, payload_len);
+      return true;
     }
   }
 
-  uint8_t payload[MAX_PAYLOAD];
-  if (payload_len > 0) {
-    Serial.readBytes(payload, payload_len);
+  // No header found - if buffer is large and contains no header, 
+  // it might be STK500 data, so don't clear, let STK handler deal with it
+  // But if buffer is very large (>500) and no header, clear some to avoid overflow
+  if (avail > 500) {
+    // Keep last 100 bytes
+    while (rx_available() > 100) rx_pop();
   }
-
-  uint8_t crc_l = Serial.read();
-  uint8_t crc_h = Serial.read();
-  uint16_t received_crc = crc_l | (crc_h << 8);
-
-  uint8_t footer1 = Serial.read();
-  uint8_t footer2 = Serial.read();
-
-  if (footer1 != FRAME_FOOTER1 || footer2 != FRAME_FOOTER2) {
-    // Bad footer, discard
-    return true;
-  }
-
-  // Validate CRC
-  uint8_t crc_data[600];
-  crc_data[0] = cmd;
-  crc_data[1] = seq;
-  crc_data[2] = len_l;
-  crc_data[3] = len_h;
-  memcpy(&crc_data[4], payload, payload_len);
-  uint16_t calc_crc = crc16_ccitt(crc_data, 4 + payload_len);
-
-  if (calc_crc != received_crc) {
-    // CRC mismatch, send error?
-    // Don't send error for CRC mismatch to avoid loops, just ignore
-    return true;
-  }
-
-  // Valid packet! Handle command
-  // We'll process in a separate function
-  extern void handle_framed_command(uint8_t cmd, uint8_t seq, uint8_t *payload, uint16_t len);
-  handle_framed_command(cmd, seq, payload, payload_len);
-
-  return true;
+  
+  return false;
 }
 
 // =============================================================================
-// AVR ISP Low-Level Functions (Preserved from ArduinoISP)
+// AVR ISP Low-Level Functions
 // =============================================================================
 
 uint8_t spi_transaction(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
@@ -399,11 +434,10 @@ uint8_t spi_transaction(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 }
 
 void avr_reset_target(bool reset) {
-  digitalWrite(PIN_AVR_RESET, reset ? LOW : HIGH); // Active low
+  digitalWrite(PIN_AVR_RESET, reset ? LOW : HIGH);
 }
 
 bool avr_enter_progmode() {
-  // Reset target
   digitalWrite(PIN_AVR_RESET, HIGH);
   pinMode(PIN_AVR_RESET, OUTPUT);
   SPI.begin();
@@ -415,16 +449,12 @@ bool avr_enter_progmode() {
   avr_reset_target(true);
   delay(20);
 
-  // Send programming enable: 0xAC 0x53 0x00 0x00, expect 0x53 in 3rd byte?
-  // Actually we check if response is 0x53 or at least not 0x00/0xFF
   uint8_t resp = spi_transaction(0xAC, 0x53, 0x00, 0x00);
-  // Second attempt
   if (resp != 0x53) {
     delay(20);
     resp = spi_transaction(0xAC, 0x53, 0x00, 0x00);
   }
 
-  // If we get 0x00 or 0xFF, target not responding
   if (resp == 0x00 || resp == 0xFF) {
     return false;
   }
@@ -481,8 +511,6 @@ bool avr_read_eeprom(uint16_t addr, uint8_t *buf, uint16_t len) {
 
 bool avr_write_flash_page(uint32_t addr, uint8_t *data, uint16_t len) {
   if (!pmode) return false;
-  // addr is byte address, but page is word address
-  // Load page buffer
   for (uint16_t i = 0; i < len; i++) {
     uint32_t word_addr = (addr + i) >> 1;
     bool high = (addr + i) & 1;
@@ -490,10 +518,9 @@ bool avr_write_flash_page(uint32_t addr, uint8_t *data, uint16_t len) {
     spi_transaction(cmd, (word_addr >> 8) & 0xFF, word_addr & 0xFF, data[i]);
     delayMicroseconds(100);
   }
-  // Write page
   uint32_t page_addr = addr >> 1;
   spi_transaction(0x4C, (page_addr >> 8) & 0xFF, page_addr & 0xFF, 0x00);
-  delay(10); // Wait for page write
+  delay(10);
   return true;
 }
 
@@ -571,7 +598,6 @@ bool spi_mem_read_jedec(uint8_t *buf) {
   buf[1] = spi_mem_transfer(0x00);
   buf[2] = spi_mem_transfer(0x00);
   spi_mem_select(false);
-  // Some devices return 0x00 0x00 0x00 if not connected
   if (buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00) return false;
   if (buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF) return false;
   return true;
@@ -596,7 +622,6 @@ bool spi_mem_write(uint32_t addr, uint8_t *data, uint16_t len) {
   uint16_t offset = 0;
   while (offset < len) {
     uint16_t chunk = len - offset;
-    // Don't cross page boundary (256 bytes)
     uint16_t page_offset = (addr + offset) % 256;
     uint16_t space_in_page = 256 - page_offset;
     if (chunk > space_in_page) chunk = space_in_page;
@@ -623,16 +648,13 @@ bool spi_mem_erase(uint8_t type, uint32_t addr) {
   spi_mem_write_enable();
   spi_mem_select(true);
   if (type == 0xC7) {
-    // Chip erase
     spi_mem_transfer(0xC7);
   } else if (type == 0x20) {
-    // Sector erase 4KB
     spi_mem_transfer(0x20);
     spi_mem_transfer((addr >> 16) & 0xFF);
     spi_mem_transfer((addr >> 8) & 0xFF);
     spi_mem_transfer(addr & 0xFF);
   } else if (type == 0xD8) {
-    // Block erase 64KB
     spi_mem_transfer(0xD8);
     spi_mem_transfer((addr >> 16) & 0xFF);
     spi_mem_transfer((addr >> 8) & 0xFF);
@@ -643,7 +665,6 @@ bool spi_mem_erase(uint8_t type, uint32_t addr) {
   }
   spi_mem_select(false);
 
-  // Wait for erase - chip erase can take several seconds
   uint16_t timeout = (type == 0xC7) ? 10000 : 3000;
   return spi_mem_wait_ready(timeout);
 }
@@ -654,7 +675,7 @@ bool spi_mem_erase(uint8_t type, uint32_t addr) {
 
 void i2c_init() {
   Wire.begin();
-  Wire.setClock(100000); // 100kHz
+  Wire.setClock(100000);
 }
 
 bool i2c_scan(uint8_t *found, uint8_t *count) {
@@ -666,7 +687,7 @@ bool i2c_scan(uint8_t *found, uint8_t *count) {
     if (err == 0) {
       found[*count] = addr;
       (*count)++;
-      if (*count >= 32) break; // limit
+      if (*count >= 32) break;
     }
   }
   return *count > 0;
@@ -690,7 +711,7 @@ bool i2c_read(uint8_t dev_addr, uint16_t mem_addr, uint8_t addr_width, uint8_t *
   uint16_t offset = 0;
   while (offset < len) {
     uint16_t chunk = len - offset;
-    if (chunk > 32) chunk = 32; // Wire buffer limit
+    if (chunk > 32) chunk = 32;
 
     uint8_t requested = Wire.requestFrom(dev_addr, chunk);
     if (requested == 0) return false;
@@ -706,10 +727,8 @@ bool i2c_write(uint8_t dev_addr, uint16_t mem_addr, uint8_t addr_width, uint8_t 
   i2c_init();
   uint16_t offset = 0;
   while (offset < len) {
-    // Page write handling - don't cross page boundary
-    // For simplicity, assume 32-byte pages for now, but caller handles paging
     uint16_t chunk = len - offset;
-    if (chunk > 30) chunk = 30; // Leave room for addr bytes
+    if (chunk > 30) chunk = 30;
 
     Wire.beginTransmission(dev_addr);
     if (addr_width == 2) {
@@ -722,7 +741,7 @@ bool i2c_write(uint8_t dev_addr, uint16_t mem_addr, uint8_t addr_width, uint8_t 
     if (Wire.endTransmission() != 0) return false;
 
     offset += chunk;
-    delay(10); // Write cycle time
+    delay(10);
   }
   return true;
 }
@@ -733,7 +752,6 @@ bool i2c_write(uint8_t dev_addr, uint16_t mem_addr, uint8_t addr_width, uint8_t 
 
 void handle_framed_command(uint8_t cmd, uint8_t seq, uint8_t *payload, uint16_t len) {
   uint8_t resp_buf[512];
-  uint16_t resp_len = 0;
 
   switch (cmd) {
     case CMD_GET_VERSION: {
@@ -761,8 +779,7 @@ void handle_framed_command(uint8_t cmd, uint8_t seq, uint8_t *payload, uint16_t 
         break;
       }
       uint8_t proto = payload[0];
-      if (proto >= PROTOCOL_NONE && proto <= PROTOCOL_I2C_MEM) {
-        // Exit previous protocol
+      if (proto <= PROTOCOL_I2C_MEM) {
         if (current_protocol == PROTOCOL_AVR_ISP && pmode) {
           avr_exit_progmode();
         }
@@ -822,19 +839,16 @@ void handle_framed_command(uint8_t cmd, uint8_t seq, uint8_t *payload, uint16_t 
         send_error(cmd, seq, STATUS_ERROR_NO_TARGET);
         break;
       }
-      // Check for invalid signature
       if ((sig[0] == 0x00 && sig[1] == 0x00 && sig[2] == 0x00) ||
           (sig[0] == 0xFF && sig[1] == 0xFF && sig[2] == 0xFF)) {
         send_error(cmd, seq, STATUS_ERROR_NO_TARGET);
         break;
       }
-      // Return signature + dummy flash/eeprom sizes (will be looked up on PC side)
       resp_buf[0] = sig[0];
       resp_buf[1] = sig[1];
       resp_buf[2] = sig[2];
-      // For compatibility, add flash size as 32KB and eeprom 1KB if unknown
-      resp_buf[3] = 32; resp_buf[4] = 0; // flash KB
-      resp_buf[5] = 1; resp_buf[6] = 0;  // eeprom KB
+      resp_buf[3] = 32; resp_buf[4] = 0;
+      resp_buf[5] = 1; resp_buf[6] = 0;
       send_ok(cmd, seq, resp_buf, 7);
       break;
     }
@@ -1099,12 +1113,38 @@ void handle_framed_command(uint8_t cmd, uint8_t seq, uint8_t *payload, uint16_t 
 }
 
 // =============================================================================
-// STK500v1 Compatibility (Preserved from ArduinoISP)
+// STK500v1 Compatibility - Non-blocking version
 // =============================================================================
 
+// getch with timeout - returns 0xFF on timeout
+uint8_t getch_timeout(uint16_t timeout_ms = 1000) {
+  unsigned long start = millis();
+  while (millis() - start < timeout_ms) {
+    rx_fill_from_serial();
+    if (!rx_is_empty()) {
+      return rx_pop();
+    }
+    // Also check direct Serial for STK500 compatibility
+    if (Serial.available()) {
+      return Serial.read();
+    }
+  }
+  return 0xFF; // timeout
+}
+
 uint8_t getch() {
-  while (!Serial.available());
-  return Serial.read();
+  // Blocking version for STK500 - but with longer timeout
+  unsigned long start = millis();
+  while (millis() - start < 2000) {
+    rx_fill_from_serial();
+    if (!rx_is_empty()) {
+      return rx_pop();
+    }
+    if (Serial.available()) {
+      return Serial.read();
+    }
+  }
+  return 0xFF;
 }
 
 void fill_buff(int n) {
@@ -1114,7 +1154,8 @@ void fill_buff(int n) {
 }
 
 void empty_reply() {
-  if (CRC_EOP == getch()) {
+  uint8_t eop = getch();
+  if (CRC_EOP == eop) {
     Serial.print((char)STK_INSYNC);
     Serial.print((char)STK_OK);
   } else {
@@ -1124,7 +1165,8 @@ void empty_reply() {
 }
 
 void breply(uint8_t b) {
-  if (CRC_EOP == getch()) {
+  uint8_t eop = getch();
+  if (CRC_EOP == eop) {
     Serial.print((char)STK_INSYNC);
     Serial.print((char)b);
     Serial.print((char)STK_OK);
@@ -1136,10 +1178,10 @@ void breply(uint8_t b) {
 
 void get_version(uint8_t c) {
   switch (c) {
-    case 0x80: breply(2); break; // HW version
-    case 0x81: breply(1); break; // SW major
-    case 0x82: breply(18); break; // SW minor
-    case 0x93: breply('S'); break; // serial programmer
+    case 0x80: breply(2); break;
+    case 0x81: breply(1); break;
+    case 0x82: breply(18); break;
+    case 0x93: breply('S'); break;
     default: breply(0);
   }
 }
@@ -1179,18 +1221,9 @@ void end_pmode() {
   pmode = 0;
 }
 
-bool avr_op_check() {
-  if (!pmode) {
-    error_count++;
-    return false;
-  }
-  return true;
-}
-
 void universal() {
-  uint8_t ch;
   fill_buff(4);
-  ch = spi_transaction(buff[0], buff[1], buff[2], buff[3]);
+  uint8_t ch = spi_transaction(buff[0], buff[1], buff[2], buff[3]);
   breply(ch);
 }
 
@@ -1199,12 +1232,7 @@ void flash(uint8_t hilo, unsigned int addr, uint8_t data) {
 }
 
 void commit(unsigned int addr) {
-  if (param.devicecode >= 0xe0) {
-    // AT89S
-    spi_transaction(0x4C, addr >> 8 & 0xFF, addr & 0xFF, 0);
-  } else {
-    spi_transaction(0x4C, (addr >> 8) & 0xFF, addr & 0xFF, 0);
-  }
+  spi_transaction(0x4C, (addr >> 8) & 0xFF, addr & 0xFF, 0);
 }
 
 unsigned int current_page() {
@@ -1213,17 +1241,6 @@ unsigned int current_page() {
   if (param.pagesize == 128) return here & 0xFFFFFFC0;
   if (param.pagesize == 256) return here & 0xFFFFFF80;
   return here;
-}
-
-void write_flash(unsigned int l) {
-  fill_buff(l);
-  if (CRC_EOP == getch()) {
-    Serial.print((char)STK_INSYNC);
-    Serial.print((char)write_flash_pages(l));
-  } else {
-    error_count++;
-    Serial.print((char)STK_NOSYNC);
-  }
 }
 
 uint8_t write_flash_pages(int length) {
@@ -1242,28 +1259,13 @@ uint8_t write_flash_pages(int length) {
   return STK_OK;
 }
 
-#define EECHUNK 32
-uint8_t write_eeprom(unsigned int length) {
-  fill_buff(length);
-  if (CRC_EOP == getch()) {
-    Serial.print((char)STK_INSYNC);
-    Serial.print((char)write_eeprom_chunk(0, length));
-  } else {
-    error_count++;
-    Serial.print((char)STK_NOSYNC);
-  }
-  return STK_OK;
-}
-
 uint8_t write_eeprom_chunk(unsigned int start, unsigned int length) {
   fill_buff(length);
-  prog_lamp(LOW);
   for (unsigned int x = 0; x < length; x++) {
     unsigned int addr = start + x;
     spi_transaction(0xC0, (addr >> 8) & 0xFF, addr & 0xFF, buff[x]);
     delay(45);
   }
-  prog_lamp(HIGH);
   return STK_OK;
 }
 
@@ -1272,20 +1274,31 @@ void prog_lamp(int state) {
 }
 
 void avrisp() {
-  uint8_t ch = getch();
+  // Check if we have data in rx_buf first
+  uint8_t ch;
+  if (!rx_is_empty()) {
+    ch = rx_pop();
+  } else {
+    if (!Serial.available()) return;
+    ch = Serial.read();
+  }
+
   switch (ch) {
-    case '0': // signon
+    case '0':
       error_count = 0;
       empty_reply();
       break;
     case '1':
-      if (getch() == CRC_EOP) {
-        Serial.print((char)STK_INSYNC);
-        Serial.print("AVR ISP");
-        Serial.print((char)STK_OK);
-      } else {
-        error_count++;
-        Serial.print((char)STK_NOSYNC);
+      {
+        uint8_t eop = getch();
+        if (eop == CRC_EOP) {
+          Serial.print((char)STK_INSYNC);
+          Serial.print("AVR ISP");
+          Serial.print((char)STK_OK);
+        } else {
+          error_count++;
+          Serial.print((char)STK_NOSYNC);
+        }
       }
       break;
     case '@': {
@@ -1312,7 +1325,8 @@ void avrisp() {
     }
     case 'E': {
       fill_buff(5);
-      if (CRC_EOP == getch()) {
+      uint8_t eop = getch();
+      if (eop == CRC_EOP) {
         Serial.print((char)STK_INSYNC);
         Serial.print((char)STK_OK);
       } else {
@@ -1327,39 +1341,50 @@ void avrisp() {
       empty_reply();
       break;
     }
-    case 'R': {
-      // Read flash low/high handled via U command in newer
-      break;
-    }
     case 'U': {
-      // Set address
       here = getch();
       here += 256 * getch();
       empty_reply();
       break;
     }
-    case 0x60: // STK_PROG_FLASH
-    case 0x61: { // STK_PROG_DATA
+    case 0x60:
+    case 0x61: {
       uint8_t low = getch();
       uint8_t high = getch();
       unsigned int l = low + 256 * high;
-      if (ch == 0x60) write_flash(l);
-      else {
-        // eeprom
+      if (ch == 0x60) {
+        fill_buff(l);
+        uint8_t eop = getch();
+        if (eop == CRC_EOP) {
+          Serial.print((char)STK_INSYNC);
+          Serial.print((char)write_flash_pages(l));
+        } else {
+          error_count++;
+          Serial.print((char)STK_NOSYNC);
+        }
+      } else {
         uint8_t memtype = getch();
         (void)memtype;
-        write_eeprom(l);
+        fill_buff(l);
+        uint8_t eop = getch();
+        if (eop == CRC_EOP) {
+          Serial.print((char)STK_INSYNC);
+          Serial.print((char)write_eeprom_chunk(0, l));
+        } else {
+          error_count++;
+          Serial.print((char)STK_NOSYNC);
+        }
       }
       break;
     }
-    case 0x64: // STK_PROG_PAGE
-    {
+    case 0x64: {
       uint8_t low = getch();
       uint8_t high = getch();
       unsigned int l = low + 256 * high;
       uint8_t memtype = getch();
       fill_buff(l);
-      if (CRC_EOP == getch()) {
+      uint8_t eop = getch();
+      if (eop == CRC_EOP) {
         Serial.print((char)STK_INSYNC);
         uint8_t ok = STK_FAILED;
         if (memtype == 'F') {
@@ -1375,21 +1400,21 @@ void avrisp() {
       }
       break;
     }
-    case 'V': // STK_UNIVERSAL
+    case 'V':
       universal();
       break;
-    case 'Q': // STK_LEAVE_PROGMODE
+    case 'Q':
       error_count = 0;
       end_pmode();
       empty_reply();
       break;
-    case 0x75: // STK_READ_PAGE
-    {
+    case 0x75: {
       uint8_t low = getch();
       uint8_t high = getch();
       unsigned int l = low + 256 * high;
       uint8_t memtype = getch();
-      if (CRC_EOP != getch()) {
+      uint8_t eop = getch();
+      if (eop != CRC_EOP) {
         error_count++;
         Serial.print((char)STK_NOSYNC);
         break;
@@ -1416,9 +1441,9 @@ void avrisp() {
       Serial.print((char)(ok ? STK_OK : STK_FAILED));
       break;
     }
-    case 0x74: // STK_READ_SIGN
-    {
-      if (CRC_EOP != getch()) {
+    case 0x74: {
+      uint8_t eop = getch();
+      if (eop != CRC_EOP) {
         error_count++;
         Serial.print((char)STK_NOSYNC);
         break;
@@ -1440,16 +1465,19 @@ void avrisp() {
     }
     default:
       error_count++;
-      if (CRC_EOP == getch()) {
-        Serial.print((char)STK_UNKNOWN);
-      } else {
-        Serial.print((char)STK_NOSYNC);
+      {
+        uint8_t eop = getch();
+        if (eop == CRC_EOP) {
+          Serial.print((char)STK_UNKNOWN);
+        } else {
+          Serial.print((char)STK_NOSYNC);
+        }
       }
   }
 }
 
 // =============================================================================
-// Setup and Loop
+// Setup and Loop - Robust
 // =============================================================================
 
 void setup() {
@@ -1463,21 +1491,15 @@ void setup() {
   pulse_led(LED_HB, 2);
 
   pinMode(PIN_AVR_RESET, OUTPUT);
-  digitalWrite(PIN_AVR_RESET, HIGH); // Not in reset (active low, so HIGH = not reset)
+  digitalWrite(PIN_AVR_RESET, HIGH);
 
   pinMode(PIN_SPI_MEM_CS, OUTPUT);
   digitalWrite(PIN_SPI_MEM_CS, HIGH);
 
-  // Initialize I2C
   Wire.begin();
+  rx_clear();
 
-  // Heartbeat init
-  digitalWrite(LED_HB, LOW);
-
-  // Send boot message for debugging (optional)
   delay(100);
-  // Don't send boot message in STK mode to avoid confusing avrdude
-  // Instead, wait for commands
 }
 
 uint8_t hbval = 128;
@@ -1491,15 +1513,10 @@ void heartbeat() {
   if (hbval > 192) hbdelta = -hbdelta;
   if (hbval < 32) hbdelta = -hbdelta;
   hbval += hbdelta;
-#ifdef ARDUINO_ARCH_ESP32
   analogWrite(LED_HB, hbval);
-#else
-  analogWrite(LED_HB, hbval);
-#endif
 }
 
 void loop() {
-  // Handle LEDs
   if (pmode) {
     digitalWrite(LED_PMODE, HIGH);
   } else {
@@ -1514,27 +1531,45 @@ void loop() {
 
   heartbeat();
 
-  if (!Serial.available()) return;
+  // Fill RX buffer from serial
+  rx_fill_from_serial();
 
-  // Peek first byte to decide protocol
-  // If it's 0xAA, it's framed protocol, else STK500
-  int first = Serial.peek();
-
-  if (first == 0xAA) {
-    // Framed protocol - check for full header
-    if (Serial.available() >= 2) {
-      uint8_t b1 = Serial.read();
-      uint8_t b2 = Serial.read();
-      if (b1 == FRAME_HEADER1 && b2 == FRAME_HEADER2) {
-        // Valid framed header, parse rest
-        try_parse_framed_packet();
-      } else {
-        // Not a valid header, treat as STK? Put back? We already consumed, so ignore
-        // For safety, flush
-      }
+  // First, try to handle framed protocol (priority)
+  // Try multiple times to handle burst
+  for (uint8_t i = 0; i < 3; i++) {
+    if (try_parse_framed_from_buffer()) {
+      continue;
+    } else {
+      break;
     }
-  } else {
-    // STK500 protocol
-    avrisp();
+  }
+
+  // If no framed packet handled, try STK500 if we have data
+  if (!rx_is_empty()) {
+    // Peek first byte - if it's AA, it might be partial framed packet, wait for more
+    uint8_t first = rx_peek(0);
+    if (first == 0xAA) {
+      // Might be start of framed, but not enough data yet - wait
+      if (rx_available() < 10) {
+        // Not enough for framed, but also check if second byte is 55
+        // If we have at least 2 bytes and second is not 55, it's not framed
+        if (rx_available() >= 2) {
+          uint8_t second = rx_peek(1);
+          if (second != 0x55) {
+            // Not framed, treat as STK
+            avrisp();
+          }
+          // Else wait for more data
+        }
+      } else {
+        // We have enough for minimal, but try_parse failed - might be corrupted
+        // Try STK as fallback if first byte looks like STK command
+        // STK commands are ASCII '0','1','A','B', etc (0x30-0x5A) or 0x60,0x61,0x64,0x74,0x75
+        // AA (0xAA) is not valid STK, so don't handle as STK
+      }
+    } else {
+      // Not AA, likely STK500 command
+      avrisp();
+    }
   }
 }
